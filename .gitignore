@@ -7,6 +7,7 @@ __pycache__/
 # C++ 編譯產物與依賴檔
 src/*.o
 src/*.d
+src/*_backup.cpp
 floorplanner
 
 # 打包與暫存產物
@@ -18,3 +19,6 @@ submit/*.zip
 *.csv
 *.sol
 .DS_Store
+
+# 論文
+Papers/
