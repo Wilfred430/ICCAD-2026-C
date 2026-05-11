@@ -166,14 +166,24 @@ SAResult SimulatedAnnealing::run(BTree current) {
             iters_since_improvement = 0;
         }
 
+        // Log every 4th iter.  IMPORTANT: log `cost` (the SA's CURRENT
+        // accepted state), NOT `nc` (the candidate move's cost).
         //
+        // `nc` includes proposals that were REJECTED — and B*-tree moves
+        // can rearrange 10–50 blocks at once, so a rejected `nc` can be
+        // 5–10× higher than the accepted `cost`.  Logging `nc` makes the
+        // graph look like wild oscillation when in fact `cost` is moving
+        // smoothly: the lower envelope of the noisy curve is the real SA
+        // trajectory.  Logging `cost` instead matches the CSV header
+        // ("CurrentCost") and gives a graph that looks like the smooth
+        // descent you expect from a partition-SA-style problem.
         if(counter == 3){
-            csv_file << iter << "," << T << "," << nc << "," << R.best_sa_cost << "\n";
+            csv_file << iter << "," << T << "," << cost << "," << R.best_sa_cost << "\n";
             counter = 0;
         }else{
             counter++;
         }
-        
+
 
         if (d > 0) { running_delta_sum += d; ++running_delta_n; }
 
