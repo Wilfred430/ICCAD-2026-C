@@ -56,13 +56,45 @@ struct Costs {
 // area/HPWL contribute O(1-3) each (post-baseline normalisation).
 struct SAWeights {
     Real w_area     = 1.0;     // bounding-box area (normalised by baseline)
-    Real w_hpwl     = 1.0;     // total HPWL (normalised by baseline)
+
+    // HPWL has two physically different terms:
+    //   HPWL_int (b2b): pulls connected blocks together -- has NO absolute
+    //                   position preference; the whole cluster can float.
+    //   HPWL_ext (p2b): pulls each block toward its terminal -- THIS is the
+    //                   only term that anchors the floorplan to the terminal
+    //                   bounding-box, since terminals are at fixed (x,y).
+    // We split the weights so SA can be told "pay more attention to the
+    // terminals" than "pack neighbours tight".  This is what stops a
+    // floorplan from drifting outside the terminal extent (the case-55 "tall
+    // & thin" symptom).
+    //
+    // w_hpwl is kept as a legacy single knob: if w_hpwl_int / w_hpwl_ext are
+    // both 0, sa_cost falls back to using w_hpwl for the whole HPWL_total.
+    Real w_hpwl     = 0.0;     // legacy: use the split below by default
+    Real w_hpwl_int = 1.0;     // internal (block-to-block) HPWL weight
+    Real w_hpwl_ext = 1.0;     // external (block-to-terminal) HPWL weight.
+                               // Equal to int by default = identical to the
+                               // pre-split behaviour (w_hpwl=1.0 single).
+                               // BUMP THIS to bias SA toward fitting inside
+                               // the terminal extent (we tried 3.0 first and
+                               // it overpowered area / soft-V, blowing cost
+                               // up to 7.8 on case 55).  Recommended sweep:
+                               // 1.2, 1.5, 2.0 — find the case-specific knee.
+
     Real w_overlap  = 5000.0;  // huge -- overlap is hard
     Real w_softarea = 5000.0;  // huge -- soft-block area-tolerance is hard
     Real w_group    = 80.0;    // grouping  (was 5; contest cost is exponential in V_rel)
     Real w_mib      = 80.0;    // MIB
     Real w_bound    = 80.0;    // boundary
-    Real w_outline  = 0.0;     // 0 by default (no fixed outline in v9)
+
+    // Aspect-ratio penalty.  Adds w_outline * |log(bbox_w/bbox_h)| to sa_cost.
+    // Reverted to 0 by default: the terminal extent (via w_hpwl_ext) already
+    // dictates the ideal aspect ratio for SA to converge to.  Forcing a
+    // square bbox (w_outline > 0) is a kludge that ignores that signal --
+    // e.g. case 55's ideal bbox is 150x175 (terminal extent), not a square.
+    // Leave the knob exposed for cases where terminals are sparse or
+    // symmetrically distributed.
+    Real w_outline  = 0.0;
 };
 
 class Evaluator {

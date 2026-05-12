@@ -227,10 +227,18 @@ ParallelResult run_parallel(const FloorplanInstance& inst,
     threads.reserve(N);
     std::vector<std::unique_ptr<SimulatedAnnealing>> sas(N);
 
+    // Cross-thread early-stop atomic.  Any SA chain that reaches
+    // target_contest_cost sets this; every chain checks it at the top of
+    // each iter and exits if set.  Lives on the stack of run_parallel so
+    // its lifetime trivially outlasts all worker threads (which we join
+    // before returning).
+    std::atomic<bool> shared_stop{false};
+
     for (int i = 0; i < N; ++i) {
         SAConfig sa_cfg = cfg.sa_cfg;
-        sa_cfg.time_budget_sec = cfg.time_budget_sec;
-        sas[i] = std::make_unique<SimulatedAnnealing>(inst, sa_cfg, base_seed + 1009u * (uint64_t)i);
+        sa_cfg.stopping.time_budget_sec = cfg.time_budget_sec;
+        sas[i] = std::make_unique<SimulatedAnnealing>(
+            inst, sa_cfg, base_seed + 1009u * (uint64_t)i, &shared_stop);
     }
 
     for (int i = 0; i < N; ++i) {

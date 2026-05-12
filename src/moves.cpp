@@ -23,7 +23,7 @@ Real rand_real(RNG& rng, Real lo, Real hi) {
 // Clamp h/w to [ar_min, ar_max] while preserving area = a (within tol).
 inline std::pair<Real, Real> sample_dims(Real area, Real ar_min, Real ar_max,
                                          std::mt19937_64& rng,
-                                         Real tol = 0.005) {
+                                         Real tol) {
     // Pick aspect ratio r = h/w in [ar_min, ar_max], possibly perturbed.
     Real r = std::exp(rand_real(rng, std::log(ar_min), std::log(ar_max)));
     // Choose nominal area in [(1-tol)a, (1+tol)a] so we land safely inside the
@@ -159,7 +159,7 @@ bool MoveEngine::apply_ar(const FloorplanInstance& inst, BTree& t, Move& m) {
         m.v = v;
         m.saved_w = t.w[v];
         m.saved_h = t.h[v];
-        auto [nw, nh] = sample_dims(b.area_target, b.ar_min, b.ar_max, rng_);
+        auto [nw, nh] = sample_dims(b.area_target, b.ar_min, b.ar_max, rng_, prob_.tol_ar);
         t.w[v] = nw;
         t.h[v] = nh;
         return true;
@@ -185,7 +185,7 @@ bool MoveEngine::apply_mib(const FloorplanInstance& inst, BTree& t, Move& m) {
             break;
         }
         if (area <= 0) continue;
-        auto [nw, nh] = sample_dims(area, armin, armax, rng_);
+        auto [nw, nh] = sample_dims(area, armin, armax, rng_, prob_.tol_ar);
         m.mib_blocks = group;
         m.saved_w_vec.assign(group.size(), 0);
         m.saved_h_vec.assign(group.size(), 0);
@@ -303,26 +303,18 @@ bool MoveEngine::apply_fixb(const FloorplanInstance& inst, BTree& t, Move& m,
 
 Move MoveEngine::propose(const FloorplanInstance& inst, BTree& tree, const Costs* prev) {
     Move m{};
-    // Probabilities (sum to 1). The original P_FIX = 0.0005 produced ~1
-    // boundary fix per 2000 iters — far too rare given that random initial
-    // trees start with most boundary blocks violated. Bumped to P_FIXB +
-    // P_FIXG = 0.10 so SA can chase boundary/grouping satisfaction.
-    constexpr double P_FIXB = 0.05;
-    constexpr double P_FIXG = 0.05;
-    constexpr double P_AR   = 0.18;
-    constexpr double P_MIB  = 0.05;
-    constexpr double P_ROT  = 0.15;
-    constexpr double P_SWP  = 0.15;
-    // remainder ~0.37 = move
+    // Probabilities live in this->prob_ (configurable from sa.hpp::MoveProb).
+    // Constraint: p_fixb + p_fixg + p_ar + p_mib + p_rot + p_swp <= 1.0;
+    // the remainder goes to MoveKind::Move (the biggest-Δ subtree graft).
     double r = std::uniform_real_distribution<double>(0, 1)(rng_);
     double acc = 0.0;
-    if      (r < (acc += P_FIXB)) m.kind = MoveKind::FixBoundary;
-    else if (r < (acc += P_FIXG)) m.kind = MoveKind::FixGrouping;
-    else if (r < (acc += P_AR))   m.kind = MoveKind::AspectRatio;
-    else if (r < (acc += P_MIB))  m.kind = MoveKind::MibSync;
-    else if (r < (acc += P_ROT))  m.kind = MoveKind::Rotate;
-    else if (r < (acc += P_SWP))  m.kind = MoveKind::Swap;
-    else                          m.kind = MoveKind::Move;
+    if      (r < (acc += prob_.p_fixb)) m.kind = MoveKind::FixBoundary;
+    else if (r < (acc += prob_.p_fixg)) m.kind = MoveKind::FixGrouping;
+    else if (r < (acc += prob_.p_ar))   m.kind = MoveKind::AspectRatio;
+    else if (r < (acc += prob_.p_mib))  m.kind = MoveKind::MibSync;
+    else if (r < (acc += prob_.p_rot))  m.kind = MoveKind::Rotate;
+    else if (r < (acc += prob_.p_swp))  m.kind = MoveKind::Swap;
+    else                                m.kind = MoveKind::Move;
 
     bool ok = false;
     switch (m.kind) {

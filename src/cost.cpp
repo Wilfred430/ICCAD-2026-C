@@ -196,11 +196,31 @@ Real Evaluator::sa_cost(const Costs& c, const SAWeights& W,
     Real abase = (inst.baseline_area > 0) ? inst.baseline_area : 1.0;
     Real hbase = (inst.baseline_hpwl > 0) ? inst.baseline_hpwl : 1.0;
 
+    // HPWL: support both legacy single-weight (w_hpwl) and split (w_hpwl_int /
+    // w_hpwl_ext) modes.  Split is preferred -- it lets us boost terminal pull
+    // independently of internal cluster-tightness.
+    Real hpwl_term = 0.0;
+    if (W.w_hpwl_int > 0 || W.w_hpwl_ext > 0) {
+        hpwl_term = W.w_hpwl_int * (c.hpwl_int / hbase)
+                  + W.w_hpwl_ext * (c.hpwl_ext / hbase);
+    } else {
+        hpwl_term = W.w_hpwl * (c.hpwl_total / hbase);
+    }
+
     Real cost = W.w_area * (c.area_bbox / abase)
-              + W.w_hpwl * (c.hpwl_total / hbase)
+              + hpwl_term
               + W.w_group * (Real)c.v_grouping
               + W.w_mib   * (Real)c.v_mib
               + W.w_bound * (Real)c.v_boundary;
+
+    // Aspect-ratio penalty: |log(bbox_w / bbox_h)|.  0 = disabled.  Kept as
+    // an escape hatch for cases where terminal signal is too weak (sparse or
+    // symmetric terminals).  Default w_outline = 0; tune up if a case still
+    // grows tall-thin even with strong w_hpwl_ext.
+    if (W.w_outline > 0 && c.bbox_w > 0 && c.bbox_h > 0) {
+        Real ar_dev = std::abs(std::log(c.bbox_w / c.bbox_h));
+        cost += W.w_outline * ar_dev;
+    }
 
     // Continuous overlap penalty: scale by overlap area / baseline so the
     // gradient is smooth.  We still keep a small constant "kicker" so that
