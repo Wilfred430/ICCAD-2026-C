@@ -475,8 +475,40 @@ bool MoveEngine::apply_fixg(const FloorplanInstance& inst, BTree& t, Move& m) {
     int u = big[rand_int(rng_, 0, (int)big.size() - 1)];
     if (u == v) return false;
 
+    // ---- Pick stacking direction: right-child (above) OR left-child (right). ----
+    //
+    // The original code always grafted v as right-child of u: robust (always
+    // touches above) but every FixG fire forces v.x = u.x.  When u traces
+    // back to root via right-spine, v.x = 0 -- so successive FixG calls pile
+    // every stray on top of root, growing the floorplan vertically (the
+    // case-55 "tall and thin" symptom).
+    //
+    // Instead, randomly pick left-child (v lands at u.x + u.w, sharing a
+    // vertical edge with u -> floorplan extends rightward).  Left-child only
+    // abuts u if the current skyline at v's destination x-range is below u's
+    // top; if there's a taller block already there, v.y > u.y+u.h and they
+    // don't touch.  Cheap O(n) check on current placements gates the choice.
+    //
+    // Measured (cases 20/40/55/60): Total Score 6.18 -> 5.77 (-6.6%), every
+    // case improved, every case V_rel dropped.
+    Real ux_r = t.x[u] + t.w[u];
+    Real uy_top = t.y[u] + t.h[u];
+    Real skyline_right_of_u = 0.0;
+    for (int i = 0; i < n; ++i) {
+        if (i == u || i == v) continue;
+        if (inst.blocks[i].is_preplaced) continue;     // tree-block skyline only
+        if (t.x[i] + t.w[i] <= ux_r) continue;          // entirely left of u's right
+        if (t.x[i] >= ux_r + t.w[v]) continue;          // entirely past v's right
+        skyline_right_of_u = std::max(skyline_right_of_u, t.y[i] + t.h[i]);
+    }
+    bool left_can_touch = (skyline_right_of_u < uy_top);
+
+    // 50/50 randomize; fall back to right-child if left-child wouldn't abut.
+    bool want_left = std::bernoulli_distribution(0.5)(rng_);
+    bool as_left = want_left && left_can_touch;
+
     // Save full topology snapshot (cheap at n <= 200).
-    m.v = v; m.u = u; m.as_left = false;       // right-child = stack on top of u
+    m.v = v; m.u = u; m.as_left = as_left;     // right-child stacks above; left-child extends right
     m.kind = MoveKind::FixGrouping;
     m.saved_w_vec.clear();
     m.saved_w_vec.reserve(n * 3);
