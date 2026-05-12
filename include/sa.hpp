@@ -39,7 +39,7 @@ struct SACooling {
     // Step index where stage 2 ends and stage 3 begins.  Equivalent to the
     // FastSA paper's K constant.  Stage 2 is 1 .. K2-1 steps long; stage 3
     // runs until time/stagnation termination.
-    int    stage2_end_k = 7;
+    int    stage2_end_k = 9;
 
     // Per-step geometric multipliers.  T_new = T_old * alpha.
     //   stage1 = 1.0: T held at T1 throughout stage 1 (just one step by default)
@@ -56,10 +56,12 @@ struct SACooling {
     // we multiply T by stage3_reheat once, so SA escapes the local basin found
     // by aggressive stage-2 cooling and re-explores at a higher temperature
     // before stage 3's slow annealing.
-    //   1.0 = no reheat (pure geometric, what we shipped first)
-    //   2.0 = jump T up to 2× the stage-2 end value (recommended default)
-    //   5.0 = aggressive reheat (almost back to mid-stage-2 levels)
-    double stage3_reheat = 2.0;
+    // NOTE: with the T = T1 * stage3_reheat formula (see sa.cpp), the value
+    // is interpreted as a FRACTION of T1, not a multiplier on current T.
+    //   0.5 = jump T to half of initial T (mild reheat from late stage 2)
+    //   0.7 = jump T to 70% of initial T (the case-56 4.9158 setting)
+    //   1.0 = jump back to full T1 (FastSA-style aggressive reheat)
+    double stage3_reheat = 0.7;
 
     // Adaptive reheating inside stage 3: when iters_since_improvement
     // exceeds reheat_stagnation_iters * iters_per_step, kick T up to

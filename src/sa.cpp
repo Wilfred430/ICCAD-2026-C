@@ -239,12 +239,13 @@ SAResult SimulatedAnnealing::run(BTree current) {
             T = std::max(T_floor, T * alpha);
 
             // One-shot reheating at the stage 2 -> stage 3 boundary.
-            // Reproduces FastSA's "stage-3 starts hotter than end of stage 2"
-            // behaviour so SA can escape the basin found by stage-2 aggressive
-            // cooling and re-explore at higher T before settling.
-            if (k == cfg_.cooling.stage2_end_k + 1 &&
-                cfg_.cooling.stage3_reheat > 1.0) {
-                T = std::min(T1, T * cfg_.cooling.stage3_reheat);
+            // T is set to T1 * stage3_reheat directly (interpreted as a
+            // fraction of the initial T, not a multiplier on current T) --
+            // more intuitive than the original `min(T1, T * factor)` because
+            // the target T doesn't depend on how cold stage 2 left us.
+            // Stage 3 then cools from this set point at alpha_stage3 per step.
+            if (k == cfg_.cooling.stage2_end_k + 1) {
+                T = T1 * cfg_.cooling.stage3_reheat;
                 if (cfg_.verbose) {
                     std::cerr << "[SA] stage-3 reheat: T -> " << T << "\n";
                 }
