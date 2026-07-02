@@ -1,0 +1,29 @@
+# Python 虛擬環境與快取
+.env/
+venv/
+__pycache__/
+*.pyc
+
+# C++ 編譯產物與依賴檔
+src/*.o
+src/*.d
+src/*_backup.cpp
+floorplanner
+
+# 打包與暫存產物
+submit/floorplanner_submission/
+submit/*.zip
+
+# 暫存檔與日誌
+*.log
+*.csv
+*.sol
+.DS_Store
+
+# Windows zone-transfer 殘留（ADS 與解壓後具現化的實體檔皆涵蓋）
+*Zone.Identifier
+*:Zone.Identifier
+clean-zones.ps1
+
+# 論文
+Papers/
