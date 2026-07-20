@@ -123,14 +123,95 @@ Cost = (1 + 0.5·(HPWL_gap + Area_gap)) · exp(2·V_rel) · max(0.7, RT^0.3)
 ```
 - `HPWL_gap`, `Area_gap` are **signed** relative gaps:
   `(actual − baseline) / baseline`. Negative gaps are *good*.
+- **`baseline` (HPWL/area) is the dataset's own ground-truth/optimal
+  solution**, not a reference SA solver's output (confirmed both by
+  `iccad2026_evaluate.py::_extract_baseline()`, which reads it straight
+  from the label geometry, and by independently re-deriving
+  `metrics[0]`/`metrics[6]`/`metrics[7]` from `LiteTensorDataTest` label
+  geometry — exact match). Practical upshot: beating baseline
+  (`HPWL_gap + Area_gap < 0`, i.e. `Q < 1`) is genuinely hard since
+  baseline is already near-optimal; for realistic targets, budget for
+  `Q` slightly `> 1` and put the marginal effort into `V_rel = 0` and
+  low `RT` instead.
 - `V_rel ∈ [0, 1]`, so `exp(2·V_rel) ∈ [1, e²≈7.39]`.
 - `RT^0.3` capped at `0.7` lower bound (max 30% speed benefit).
   Slowness penalty is *uncapped*.
+- **`RuntimeFactor = Your Runtime / Median Runtime of All Submissions`,
+  computed independently per test case** (per-spec footnote: "using
+  that individual test case's median runtime as the sole reference
+  point") — this is a **cross-team, per-case** median, not something
+  you can compute or target precisely offline. `iccad2026_evaluate.py`'s
+  local `--evaluate` mode approximates it with a **self-median across
+  your own 100 validation-case runtimes** (it has no access to other
+  teams' data) — that's a local practice proxy only, not the real
+  mechanism. Don't over-index on hitting an exact local RT number;
+  the actionable takeaway is just "minimize wall-clock time on every
+  case," since the real reference point is an unknowable, competitive
+  moving target.
 
-### 7. Total score weights cases by `e^n`
-n ranges from 21 to 120. A 120-block case is `e^99 ≈ 8·10^42` times
-heavier than a 21-block case in the score sum. The big cases are
-*everything*. Plan compute budget accordingly.
+### 6a-2. `iccad2026_evaluate.py --evaluate`'s Total Score has real run-to-run noise from RT
+Because the local `--evaluate` mode's RuntimeFactor is a **self-median of your own
+100 cases' measured wall-clock time** (see 6a above), and `RT^0.3` is uncapped on
+the slow side, **the SAME deterministic algorithm can report different Total
+Score across identical runs** purely from OS scheduling/system-load jitter in the
+timing measurement — not from any actual difference in the computed geometry.
+Confirmed 2026-07-14 (`electro_optimized/`): three consecutive full-100 runs of
+the byte-identical algorithm (coordinate diff between runs = 0.00000000) gave
+Total Score 2.0158 / 2.0912 / 2.1029 — a ~5% spread from RT noise alone,
+worse when multiple processes (e.g. two people/agents benchmarking on the same
+machine at once) compete for CPU. **Practical upshot**: for "does this specific
+algorithmic change help or hurt" questions, compare using a **neutral/fixed RT**
+(RT=1.0, or whatever your harness's "Offline Neutral RT" mode is) — not the
+raw Contest-Grading Total Score, which bakes in this timing noise. Reserve the
+real-RT Total Score for a final, big-picture "is this ready to submit" check,
+and expect it to jitter a few percent between runs even with zero code changes.
+Large, clearly-explained deltas (driven by actual violation-count or geometry
+changes) are still trustworthy; single-digit-percent deltas measured this way
+are not, on their own, reliable evidence that a change helped.
+
+### 6b. `ml/contest_cost.py`'s overlap/boundary tolerance was 10x too strict (fixed 2026-07-14)
+`TOUCH_EPS` was `1e-7`; the real evaluator (`iccad2026_evaluate.py::check_overlap()`,
+line ~223: `if overlap_x > 1e-6 and overlap_y > 1e-6`) uses `1e-6`. This matters
+for **continuous/gradient-based placers** (electro's analytical optimization
+lands blocks at values like `x=118.2616...`, not tidy round numbers) —
+`legalize()`'s push/compaction arithmetic routinely leaves a residual gap in
+the `1e-7`–`9e-7` range between two blocks that are meant to exactly touch.
+The real evaluator tolerates this (`> 1e-6` required to flag); our stricter
+`1e-7` threshold was flagging these as `overlap_violation=True` → `Cost=10`,
+a **false infeasibility**. Found while building `ml/case_report_electro.py`
+(a case_report.py-style Excel report for pop's electro pipeline): a case
+independently confirmed `feasible=True, Cost=3.816` via the real evaluator
+came back `feasible=False, Cost=10.000` through `contest_cost.py` — traced
+to 4 block pairs with `overlap_area` in the `1e-7`–`9e-7` range on one axis.
+Fixed by changing `TOUCH_EPS` to `1e-6` (`ml/contest_cost.py:26`), which also
+fixes `_boundary_ok`'s edge-touching tolerance to match the real evaluator's
+own `eps = 1e-6` (line ~511) for boundary checks. **Discrete/B\*-tree-contour
+outputs are much less likely to have hit this** (the packer's arithmetic
+tends to produce exact touching coordinates, not continuous-optimization
+noise), so this probably didn't silently invalidate the generative B\*-tree
+line's "100/100 feasible" numbers reported earlier this session — but if a
+future case ever reports a surprising `Cost=10` with `overlap_violation=True`
+and the geometry looks visually fine, check for a sub-`1e-6` residual gap
+before assuming it's a real overlap bug in the placer itself.
+
+### 7. Total score weights cases by `e^(n/12)`, NOT `e^n`
+Verified 2026-07-01 against the actual spec PDF (Objective Function /
+Total Score section): `Total Score = Σ Cost[i]·e^(n_i/12) / Σ e^(n_j/12)`.
+n ranges from 21 to 120. A 120-block case is `e^(120/12)/e^(21/12) =
+e^8.25 ≈ 3820` times heavier than a 21-block case — big, but nowhere
+near the `e^99 ≈ 8·10^42` an earlier (wrong) reading of this file once
+claimed. Mid-range cases (n≈60–90) still contribute meaningfully to
+the total; don't write them off entirely. Big cases still dominate and
+should get priority, just not to the point of total tunnel vision.
+
+> **Caution**: `iccad2026_evaluate.py::compute_total_score()` in the
+> local eval harness implements `math.exp(n - max_n)` — plain `e^n`,
+> not `e^(n/12)`. This does NOT match the spec PDF. Treat the spec PDF
+> as authoritative; the local script's Total Score number is a rough
+> local proxy, not the real grading formula. (Discovered by cross-
+> checking Fable-5-drafted analysis against both the local script and
+> screenshots of the actual spec — the spec should always be pulled
+> in preference to inferring intent from repo code.)
 
 ### 8. Contest framework expects a Python module, not a tensor file
 `my_optimizer.py` (or `my_optimizer_ml.py`) is the actual submission
@@ -407,8 +488,8 @@ As of 2026-06-30, Phase 1 is done. In rough order of effort-vs-score-impact:
 
 4. **Identify worst-cost cases.** Look at `my_optimizer_results.json`
    after a full run. Cases with `cost > 2.0` dominate the weighted
-   total due to the `e^n` weighting. Profile individually with
-   `--test-id N --verbose`.
+   total due to the `e^(n/12)` weighting (see gotcha #7). Profile
+   individually with `--test-id N --verbose`.
 
 5. **Quasi-Newton geometry refinement** after SA converges (Ji 2021).
    Topology is fixed by then; only `(w, h, x, y)` continuous → 3–5%

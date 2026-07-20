@@ -12,7 +12,8 @@
 ## 0. TL;DR（30 秒版）
 
 1. **純 SA 在大 case（n≈90–120）上數學上贏不了**——$10^6$ 次評估在 $10^{250}$
-   的拓樸空間裡是盲人。而總分被 $e^n$ 加權，大 case 決定一切。
+   的拓樸空間裡是盲人。而總分被 $e^{n/12}$ 加權（2026-07-01 已對照 spec 原文
+   確認，見 §7），大 case 仍決定性地重要，但沒有早期版本以為的那麼極端。
 2. **現有 `ml/` 的 formulation 是壞的**：用 smooth-L1/MSE 回歸座標 →
    多峰解的平均 = 無效解（mode collapse）；而且**完全沒用到資料裡的
    `tree_sol`**（near-optimal 拓樸）。見 [ml/data.py:302](ml/data.py)。
@@ -22,6 +23,24 @@
    連續幾何精修 + 合法化**，算力全砸在大 case。
 4. **兩條腿走路**：電靜力法（目前最佳 2.966）當保底 backbone；
    生成式拓樸當衝頂引擎；兩者共用同一個「pack → 幾何精修 → legalize」後端。
+
+> [!info] **2026-07-14 現況更新（上面 4 點是 6/30 寫的，部分數字已過時，保留原文
+> 不動，這段補充現況）**：
+> - **生成式拓樸這條腿已經走到頭**：Total Score 13.77→3.3185，已確認到達
+>   B\*-tree/contour 表示法本身的結構性密度天花板（跟本文件當初設想的「獎勵
+>   微調 + 推論採樣衝頂」不同，實測發現post-hoc/模型微調的投報比很低，真正的
+>   瓶頸是離散打包表示法本身，不是拓樸生成品質）。詳見
+>   `Obsidian/ICCAD_code/6_ML_Generative_BTree.md` §6.6–6.16。
+> - **電靜力法這條腿分數已經不是 2.966**：原始基準（Neutral RT）2.9007，
+>   跟 Antigravity（Gemini 3.5 Flash）合作優化後目前約 2.47–2.53（Neutral RT，
+>   −13%~−15%），MIB 違規已歸零，是目前分數最好的路線。**這條線的程式碼在
+>   `collaborate/electro_optimized/`，且截至本次更新仍在被即時修改中**，
+>   完整過程見 `Obsidian/ICCAD_code/8_Winning_Strategy_and_Roadmap.md`
+>   §8.7–8.18。
+> - **當初設想的「兩條腿共用同一個 pack→精修→legalize 後端」沒有實現**：
+>   兩條線最終各自獨立發展（B\*-tree/contour vs 電靜力連續佈局），沒有合併成
+>   單一後端——這點跟本文件最初的規劃不同，是否要重新評估「兩線整合」是
+>   還沒決定的策略問題，需要跟 pop 討論分工。
 
 ---
 
@@ -33,16 +52,29 @@ $$\text{Cost} = \underbrace{(1 + 0.5(\text{HPWL\_gap} + \text{Area\_gap}))}_{\te
 
 三個推論，每個都改變策略：
 
-- **推論 1：Cost 可以 < 1。** gap 是 signed `(actual − baseline)/baseline`，
-  baseline 是 *near-optimal* 不是 optimal。**贏過** baseline → gap 為負 →
-  Cost 壓到 0.7 以下。**目標不是逼近參考解，是超越它。**
+- **推論 1（2026-07-08 再訂正）：Q 被 clamp 在 ≥1，贏過 baseline 完全沒獎勵。**
+  官方 `iccad2026_evaluate.py::compute_cost` 第 322 行是
+  `quality = 1 + 0.5·(max(0, hpwl_gap) + max(0, area_gap))`——**每個 gap 都被
+  `max(0, ·)` 夾住**。這代表：(a) 就算你的解比 baseline 還好（gap 為負），
+  也被夾成 0，Q 一律 ≥1，贏 baseline 一點分都不加；(b) 你只能「追平」
+  baseline（把 gap 壓到 ≤0 就飽和），不可能靠品質把 Q 壓到 1 以下。
+  加上 `P≥1`、`R≥0.7`，**feasible 的理論最低 Cost 就是 1×1×0.7 = 0.7，
+  這是真地板**。此前本文件（及 FABLE_BRIEF）誤寫「Cost 可以 <1 / 贏過
+  baseline 讓 gap 為負」——那是漏看了 clamp，已訂正。baseline 本身是資料集
+  自帶的 ground-truth 解（`_extract_baseline()` 直接讀 label，已用
+  `metrics[0]/[6]/[7]` 對帳確認）。**戰場結論不變甚至更清楚：品質只需
+  追平 baseline（Q→1），勝負全在 $V_{rel}=0$ 與壓低 runtime。**
 - **推論 2：$e^{2V_{rel}}$ 是乘法地獄。** 任一 soft 違規（grouping/boundary/MIB）
   指數放大。$V_{rel}=0$ 是生死線，不是加分。約束處理必須是**架構級保證**。
-- **推論 3：大 case 決定一切。** 分數按 $e^n$ 加權，n=120 比 n=21 重
-  $e^{99}\approx 10^{42}$ 倍。總分幾乎完全由 n≈90–120 決定。
-  > ⚠️ **這條必須先驗證**（見 §7）。`train.py` 註解寫的是「v10 contest」，
-  > 確認最新 spec 的加權公式到底是 $\sum e^n\text{Cost}$、normalized weighted
-  > mean、還是別的。即使比 $e^n$ 溫和，「大 case 又重又難」結論不變。
+- **推論 3：大 case 決定一切，但沒有原先想的那麼極端。** 分數按
+  $e^{n/12}$ 加權（2026-07-01 已對照 spec 原文 Total Score 公式確認，非
+  純 $e^n$），n=120 比 n=21 重 $e^{(120-21)/12} = e^{8.25}\approx 3820$ 倍。
+  大 case 仍應優先，但中段 case（n≈60–90）也有實質分數貢獻，不能完全
+  放棄。
+  > ✅ **已驗證**（原 §7 的待確認項目，見該節更新）。舊版本此處誤寫
+  > $e^{99}\approx 10^{42}$，已訂正——那是拿本地 `iccad2026_evaluate.py`
+  > 裡跟 spec 不符的 `compute_total_score()`(用了純 `e^n`)反推出來的
+  > 錯誤結論，spec 原文才是權威。
 
 ### 1.2 三個鑑別器（用來量每個方法的天花板）
 
@@ -178,29 +210,100 @@ graph electrostatic conjugate subgradient analytic 2023 2024 2025
 - legalization 後端：沿用現有 constraint-graph（[electro_submission/legalize.py](electro_submission/legalize.py)）
   還是換 CSF 的 conjugate subgradient？
 
-### 5.2 Claude 的部分（可立即開工，不被研究阻塞）
+### 5.2 Claude 的部分 —— 行動清單（2026-07-01 全面更新，整合 Fable 驗證後建議）
 
-這些**現在就能做**，不需要等探索結果：
+**✅ 已完成**（原 T1-T3 範疇，已超前完成並跑出真實數字）：
+- [x] `tree_sol` 已解密並接進 `ml/data.py`（direction bit 語義對照
+  `src/packer.cpp` 確認，round-trip 對 `fp_sol` 命中 20–77%，殘差是官方
+  後製壓縮，不影響拓樸標籤本身可用）。
+- [x] 生成式 B\*-tree 模型建置完成：`ml/model_tree.py`（三個 Pointer
+  Network：block-selection / parent-pointer / direction）、
+  `ml/train_tree.py`、`ml/pack_tree.py`（含不合法結構的確定性修復）、
+  `ml/contest_cost.py`（真實 contest cost 公式移植）、
+  `ml/run_pipeline.py`（一條龍 train→sample→pack→score→存檔）。
+- [x] GPU 150k 筆訓練：`val_ptr_acc` 87.4%，16 樣本全 feasible，
+  best Cost≈5.35（診斷：佔位方形 shape + repair pass 未接）。
+- [x] `collaborate/` 修復 submodule 指標問題並推上 GitHub（Wilfred430/ICCAD-2026-C）。
+- [x] Fable 計畫書驗證：`e^(n/12)`（非 e^n）、baseline=ground truth、
+  RuntimeFactor=跨隊伍逐 case median（非固定參考解、非自己比）——已對照
+  spec PDF 原文確認，見 §7。
 
-- [ ] **T1｜驗證現有 warm-start 是否有效**（基準線）
-  跑 v1/v2/v3 weights vs baseline（無 ML）在 100 validation case 的 Total
-  Score。預期：差異不顯著（印證 mode collapse）。產出對照表。
-- [ ] **T2｜讓 `data.py` 載入 `tree_sol`**
-  把 [ml/data.py:302](ml/data.py) 的 `tree_sol = t[4][ci]` 啟用，
-  在 `_unpack_case` 回傳，並寫一個小 script 印出 tree_sol 的張量格式
-  （shape / dtype / 編碼方式），這是階段 0 的前提。
-- [ ] **T3｜寫 tree_sol → B\*-tree 的 decode/encode 工具 + round-trip 測試**
-  確認能在 Python 端把 tree_sol 還原成 (parent, lc, rc) 並用 packer 重現
-  near-optimal 座標（對照 fp_sol，誤差應 ≈ 0）。這驗證資料正確性。
-- [ ] **T4｜把幾何精修後端獨立出來**（兩條腿共用）
-  從 [electro_submission/](electro_submission/) 抽出「固定拓樸/固定相對位置下
-  的連續 (w,h,x,y) 精修 + legalize」成獨立模組，讓 SA 解與 ML 解都能呼叫。
-- [ ] **T5｜給 SA 加低溫 refine 模式**
-  [src/sa.cpp](src/sa.cpp) 加一個 `--refine-from-init` 路徑：跳過 Stage-1
-  高溫，直接低溫 exploitation，供「好起點精修」用。
+**🔥 第一優先（高槓桿，現在就做，直接對應 Fable 診斷）**：
+- [x] **T6｜soft block shape 優化取代佔位方形**——**已完成並實測**
+  （2026-07-08）。用全域 aspect ratio 掃描（含正方形選項，保證不會變差）
+  找每個 case 最省 Cost 的長寬比。100-case 結果見 T7。
+- [x] **T7｜接上四道 packer repair pass**——**已完成並實測**
+  （2026-07-08~09）。`ml/pack_tree.py` 補齊 `bbox_balance_pass` /
+  `holes_fill_pass` / `grouping_repair_pass` / `boundary_repair_pass`
+  （照抄 `src/packer.cpp`，見 [[ICCAD_code/6_ML_Generative_BTree|6.6 節]]
+  完整數字）。**100-case 驗證（全部四道通道）：Total Score（e^(n/12) 加權）
+  從只有 `compact_left_down` 的 13.77 降到 5.13，降幅 62.7%**——純粹是把
+  C++ 那邊本來就有的修復通道移植過去，沒動任何模型權重。`grouping_repair`/
+  `boundary_repair` 讓 area_gap 從 +25% 漲回 +63%（拉去貼群組/邊界重新打開
+  一些空隙）但 Cost 仍大降，因為 $\exp(2V_{rel})$ 的指數懲罰降幅更大。這也
+  推翻了上一輪「contour 打包有結構性密度天花板」的悲觀結論——缺的只是修復
+  管線沒補齊。
+- [x] **T8｜三軟約束 by-construction 實作**（讓約束「建構即滿足」而非
+  先擺再修）——**2026-07-09 完成 grouping 主線，boundary 部分完成**：
+  - ✅ **MIB → 共享形狀變數**：已完成，`eval_full.py::dims_with_aspect`
+    強制 MIB 群組 soft 成員跟隨群組 fixed 成員的形狀，$V_{mib}\equiv0$
+    by construction（100-case 實測歸零）。
+  - ✅ **Grouping → super-block 收縮**：**已完成**（`pack_tree.py::
+    _collapse_clusters`/`_shelf_pack`）。打包**前**把整個 group 用
+    next-fit-decreasing-height 貨架式打包收成一個剛性 super-block（貨架
+    排序保證連通，$V_{group}\equiv0$ by construction），塞進 B*-tree DFS
+    當一個節點，事後展開回個別座標。單獨貢獻 Total Score −3.8%
+    （v1+分組=3.400，打敗了 v2 模型微調的 3.439——質變比模型量變更有效）。
+    除錯過程抓到三個微妙的硬約束 bug，全部修復並驗證（見
+    [[ICCAD_code/6_ML_Generative_BTree|6.12 節]]）。
+  - **✅/⏳ Boundary**：LEFT(1)/BOTTOM(8)/左下角(9) 已擴展支援
+    by-construction（這幾種代碼只看位置不看寬高，跟放大後的 anchor bbox
+    天然相容），但驗證後**貢獻趨近於零**——因為這幾種代碼在舊 post-hoc
+    通道裡本來就「保證可滿足」，沒有多餘空間可贏。**RIGHT(2)/TOP(4) 仍
+    未攻下**：post-hoc 目前用強力修復（沿牆掃描 + push_past 推出界外）
+    把違規壓到 ~12，area_gap 代價高但**實測確認是正確定價**（$\exp(2V_{rel})$
+    指數項威力大於面積損失）。要同時拿到低 $V_{rel}$ 又低面積，理論上仍
+    需要 RIGHT/TOP 的 by-construction（要解「anchor 遠端要對齊整包 bbox
+    遠端」的座標平移子問題），但工程成本高、報酬不確定，尚未著手。
 
-> 開工順序建議：**T1 → T2 → T3**（驗證 + 解鎖資料），再 **T4/T5**（後端）。
-> 階段 0 的模型訓練要等 T2/T3 完成 + §6.4 的表示法決定後才動。
+> [!結論] **2026-07-09 最終定案：13.77 → 3.3185（−75.9%），100/100
+> feasible，經三輪獨立驗證數字穩定**（見 [[ICCAD_code/6_ML_Generative_BTree|6.10–6.15 節]]）。
+> 連續兩個新招式（保約束壓實、LEFT/BOTTOM/BL 邊界擴展）貢獻都趨近於零，
+> 兩次獨立訊號指向同一結論：**這條路線容易拿的分已經拿完**。跟 pop 電靜力法
+> 2.84 的差距從 session 開始的 4.85 倍縮小到 **1.17 倍**。下一步是策略決策：
+> 投入 RIGHT/TOP 邊界 by-construction 這個不確定報酬的工程，還是把時間用在
+> 跟 pop 討論兩條線（生成式拓樸提案 vs 電靜力法後端）分工/整合。
+
+**30 天：保底骨架**
+- [ ] **T4｜把幾何精修後端獨立出來**（兩條腿共用）：從
+  [electro_submission/](electro_submission/) 抽出「固定拓樸下的連續
+  (w,h,x,y) 精修 + legalize」成獨立模組。
+- [ ] **T5｜給 SA 加低溫 refine 模式**：`src/sa.cpp` 加
+  `--refine-from-init`，跳過 Stage-1 高溫直接低溫 exploitation。
+- [ ] 在 100 筆 validation 上驗證 T8 的 by-construction 版本：**目標
+  feasible 率 100%、`V_rel=0`**，逐 size 記錄。
+
+**60 天：速度與品質收斂**
+- [ ] 從 1M 訓練集萃取 block-pair 相鄰先驗 + soft block 長寬比分佈，
+  當 SA warm-start / move 偏置，縮短收斂時間。
+- [ ] **runtime 策略更正**：RuntimeFactor 目標不可知（跨隊伍 median，
+  移動標靶，見 §7），**不要瞄準某個精確數字**，改成「盡量壓低每個
+  case 的絕對耗時」+ 硬性 wall-clock 早停。
+- [ ] Fable 方案 B：生成模型出拓樸 candidate（top-k）→ 餵進 T8 的
+  by-construction 後端 + T6 的 shape 優化 + T7 的 repair，取代單純
+  sampling 後才 repair 的現有流程。
+
+**90 天：微調與加固**
+- [ ] Stage 1 獎勵微調（reward = −contest Cost，見 §6.2），起點用 T6-T8
+  跑順後的模型。
+- [ ] n=90–120 全面壓力測試，建立 fallback（自估 Cost 超門檻 → 退回
+  純 SA / 電靜力法）。
+- [ ] Approach A（SA）vs C（電靜力）正式比較，決定最終送出哪個或如何
+  組合（取逐 case 較優者）。
+
+**❓ 仍待你確認（不影響上面的工程排程，可以並行）**：
+- FloorSet-Lite vs Prime 範圍（見 §7 第 3 點）——是否要處理 rectilinear
+  partition，若確認只考 Lite 則現有架構不用改。
 
 ---
 
@@ -248,15 +351,29 @@ loss（取代現有 smooth-L1）:
 
 ## 7. 需要先確認的事實（地基，別建在沙上）
 
-1. **評分加權公式**：到底是不是 $\sum e^n \text{Cost}$？normalized？v9 還是 v10？
-   （[train.py](ml/train.py) 註解出現「v10 contest」，但 [CLAUDE.md](CLAUDE.md)
-   寫 v9。釐清以哪份 spec 為準。）
-2. **時間預算 / RuntimeFactor 規則**在最新 spec 是否與 [ALGORITHM_GUIDE.md §3.1](ALGORITHM_GUIDE.md)
-   一致（`8+1.0*n`、$RT^{0.3}$ 下限 0.7）。
+1. ✅ **評分加權公式**——**已解決（2026-07-01）**。使用者直接提供 spec 原文
+   截圖：`Total Score = Σ Cost[i]·e^(n_i/12) / Σ e^(n_j/12)`。**不是**
+   $\sum e^n \text{Cost}$（本地 `iccad2026_evaluate.py::compute_total_score()`
+   用 `math.exp(n - max_n)`，即純 $e^n$，跟 spec 不符——那支腳本本身有
+   bug/簡化，不能當權威，spec PDF 才是）。n=120 比 n=21 重約
+   $e^{8.25}\approx 3820$ 倍。全文所有 $e^n$/$e^{99}$ 已訂正為
+   $e^{n/12}$/$\approx 3820$倍，見 §0、§1.1。
+2. ✅ **RuntimeFactor 規則**——**已解決（2026-07-01）**。Spec 原文：
+   `RuntimeFactor = Your Runtime / Median Runtime of All Submissions`，
+   footnote 補充：「computed **independently for each test design**,
+   using that **individual test case's** median runtime as the sole
+   reference point」——這是**跨隊伍、逐 test case 各自獨立計算的中位數**，
+   不是「跟自己的 100 個 case 比」，也**無法在本地離線精準得知或瞄準**
+   （取決於所有參賽者當下的表現，是個移動標靶）。
+   `iccad2026_evaluate.py` 本地 `--evaluate` 模式因為拿不到其他隊伍的
+   runtime 資料，退而求其次用「自己 100 個 case 的中位數」當本地近似
+   替代品——這只是離線練習用的代理指標，**不是真正的評分機制**，不要
+   誤把本地算出的 RT 數字當成正式排名會用的值。實務結論：**沒有能精準
+   瞄準的數字目標，唯一能做的是盡量壓低每個 case 的絕對耗時。**
 3. **FloorSet-Lite vs FloorSet-Prime**：比賽 C 是只考 Lite，還是兩者都要？
-   （影響是否要處理 rectilinear（非矩形）partition。）
+   （影響是否要處理 rectilinear（非矩形）partition。）**尚待確認。**
 
-> 這三點任何一點變動都會改架構，**研究的第一步就是確認它們**。
+> 第 3 點仍待確認會改架構；前兩點已用 spec 原文截圖 + 原始碼交叉驗證定案。
 
 ---
 

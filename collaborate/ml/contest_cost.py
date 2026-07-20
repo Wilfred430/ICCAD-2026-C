@@ -23,7 +23,7 @@ import math
 from dataclasses import dataclass
 from typing import Dict, List
 
-TOUCH_EPS = 1e-7
+TOUCH_EPS = 1e-6
 
 
 def _touches(ax, ay, aw, ah, bx, by, bw, bh) -> bool:
@@ -149,7 +149,7 @@ def evaluate(x: Dict[int, float], y: Dict[int, float], dims: Dict[int, tuple],
         members = [i for i in range(n) if int(mib_ids[i]) == mid]
         if len(members) <= 1:
             continue
-        shapes = {(round(dims[i][0], 6), round(dims[i][1], 6)) for i in members}
+        shapes = {(round(dims[i][0], 4), round(dims[i][1], 4)) for i in members}
         v_mib += max(0, len(shapes) - 1)
         n_soft += len(members) - 1
 
@@ -194,7 +194,17 @@ def evaluate(x: Dict[int, float], y: Dict[int, float], dims: Dict[int, tuple],
     if not feasible:
         cost = 10.0
     else:
-        q = 1.0 + 0.5 * (hpwl_gap + area_gap)
+        # NOTE (2026-07-08): the official evaluator clamps each gap at max(0, .)
+        # -- iccad2026_evaluate.py::compute_cost line 322:
+        #   quality_factor = 1 + ALPHA * (max(0, hpwl_gap) + max(0, area_gap))
+        # This means BEATING the baseline gives NO benefit (Q floored at 1.0);
+        # you can only match it. Q, P, R are all >= their floors, so the true
+        # minimum feasible cost is 1 * 1 * 0.7 = 0.7. We were previously missing
+        # this clamp, which mattered for any solution that beats baseline on a
+        # gap. (For the current generative model all gaps are large positive, so
+        # this particular change doesn't move its numbers -- but it makes the
+        # local scorer faithful to the real evaluator.)
+        q = 1.0 + 0.5 * (max(0.0, hpwl_gap) + max(0.0, area_gap))
         p = math.exp(2.0 * v_relative)
         rf = max(0.7, max(runtime_factor, 1e-9) ** 0.3)
         cost = q * p * rf
